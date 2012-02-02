@@ -20,4 +20,8 @@ Gem::Specification.new do |s|
   s.require_paths = ["lib"]
   s.add_dependency("nesta", ">= 0.9.11")
   s.add_development_dependency("rake")
+  s.add_development_dependency("hpricot")
+  s.add_development_dependency("nokogiri")
+  
+  
 end
