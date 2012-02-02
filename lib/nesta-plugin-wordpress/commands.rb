@@ -1,8 +1,10 @@
+require 'nesta/commands'
+
 module Nesta
   module Commands
     module Wordpress
       class Import
-        include Command
+        #include Nesta::Commands::Command
         
         def initialize(*args)
           @args = args
