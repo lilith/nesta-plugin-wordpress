@@ -15,6 +15,12 @@ module Nesta
            redirect '/articles.xml', 301
         end
         
+        get '/comments/feed/' do
+          if short_name = Nesta::Config.disqus_short_name
+            redirect "#{short_name}.disqus.com/latest.rss", 301
+          end
+        end
+        
         get '/:id/:article/feed/' do
           #TODO, look up article and redirect to intensedebate feed
         end
