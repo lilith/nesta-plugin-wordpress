@@ -33,9 +33,10 @@ module Nesta
       # wordpress.com blog (/wp-admin/export.php).
       class Importer
     
-        def self.main
+        def importFromCommandLine
       
-          offline = false
+          scanredirects = true
+          downloadattachments = true
           root = Dir.pwd
           filename = "wordpress.xml"
           drop_metadata=["Author","wp_date","wp_template"]
@@ -52,11 +53,15 @@ module Nesta
               filename = fname
             end
 
-            opts.on("-o", "--offline", "Run offline - do not track redirects or download attachments. Doesn't produce accurate 301 redirects.") do |v|
-              offline = v
+            opts.on("-a", "--[no-]attachments", "Do not download attachments.") do |v|
+              downloadattachments = !v
             end
             
-            opts.on("--drop-metadata \"Author\",\"wp_date\",\"wp_template\"", Array, "Drop the specified metadata items from the all files during conversion.") do |list|
+            opts.on("-f", "--[no-]follow", "Do not track redirects. Doesn't produce accurate 301 redirects.") do |v|
+              scanredirects = !v
+            end
+            
+            opts.on("-d","--drop-metadata \"Author\",\"wp_date\",\"wp_template\"", Array, "Drop the specified metadata items from the all files during conversion.") do |list|
               drop_metadata = list
             end
             
@@ -67,11 +72,12 @@ module Nesta
                   
           end.parse!
 
-          new Importer.import(offline,root,filename,drop_metadata);
+          import(scanredirects, downloadattachments,root,filename,drop_metadata);
         end
     
         # Returns a list of URLs (including the one passed in) based on HTTP redirects that occured. 
         def get_redirections(url, limit = 10)
+          #p "Scanning for redirections at #{url}"
           return [] if limit == 0 #Prevent infinite loops
       
           url_list = [url]
@@ -179,7 +185,7 @@ module Nesta
                   item.at('guid').inner_text,
                   get_domain(item.at('link').inner_text) + "/?p=#{post_id}"]
           meta_url = metadata["url"]
-          urls.push('/' + meta_url.gsub(/^\//,"")) if not meta_url.nil?
+          urls.push(get_domain(item.at('link').inner_text) + '/' + strip_domain(meta_url).gsub(/^\//,"")) if not meta_url.nil?
           #Cleanse array
           urls = urls.uniq.reject{|i| i.nil? || i.empty?}
           #Use HTTP requests to capture any redirections.
@@ -194,12 +200,17 @@ module Nesta
             end
           }
           #strip domains, duplicates, and remove empty values
-          return short_urls.uniq.reject{|i| i.nil? || i.empty?}
+          return short_urls.uniq.reject{|i| i.nil? || i.empty? || i == '/'}
 
         end
 
 
-        def import(offline=false, root=::File.dirname(__FILE__), filename = "wordpress.xml",  drop_metadata=["Author","wp_date","wp_template"])
+        def import(scanredirects=true,downloadattachments=true, root=::File.dirname(__FILE__), filename = "wordpress.xml",  drop_metadata=["Author","wp_date","wp_template"])
+          
+          puts "Importing #{filename} to directory #{root}"
+          puts "Metadata #{drop_metadata * ','} will be dropped"
+          puts "Scanning for alternate page/post URLs: #{scanredirects}"
+          puts "Downloading attachments: #{downloadattachments}"
           
           
           import_count = Hash.new(0)
@@ -220,8 +231,10 @@ module Nesta
             author_login = author.at('wp:author_login').inner_text.strip
             author_name = author.at('wp:author_display_name').inner_text.strip
             authors[author_login] = author_name
-            puts "Author #{author_login} will be mapped to #{author_name}"
+            puts "Author '#{author_login}' will be mapped to '#{author_name}'"
           end
+          
+          puts
       
 
           (doc/:channel/:item).each do |item|
@@ -231,10 +244,10 @@ module Nesta
             #Get post_id
             post_id = item.at('wp:post_id').inner_text
         
-            puts "Importing  #{post_id} - #{title}"
-        
             #Item type: post, page, or attachment
             type = item.at('wp:post_type').inner_text
+            
+            
             #GMT posted date - always available for attachements, but not always for posts/pages that have never been published.
             #Fall back to post_date when we get an ArgumentError - will be off by an unknown timezone, but date should be correct.
             post_date_gmt = Time.parse(item.at('wp:post_date_gmt').inner_text) rescue Time.parse(item.at('wp:post_date').inner_text)
@@ -242,13 +255,18 @@ module Nesta
             #Download attachments unless they already exist
             if type == "attachment"
               a_url = item.at('wp:attachment_url').inner_text
-              if offline
-                puts "(Offline) Skipping #{a_url}"
+              if !downloadattachments
+               puts "Skipping #{type} #{post_id} - #{title} from #{a_url}"
               else
-                download(a_url, attachment_dir + strip_domain(a_url), post_date_gmt)
+                print "Downloading #{type} #{post_id} - #{title} from #{a_url}"
+                if download(a_url, attachment_dir + strip_domain(a_url), post_date_gmt)
+                  puts "...done"
+                else
+                  puts "...skipping, previously downloaded"
+                end
               end
-            elsif
-        
+            else
+              
               #Parse metadata into a hash
               metas = Hash[item.search("wp:postmeta").map{ |meta| [meta.at('wp:meta_key').inner_text, meta.at('wp:meta_value').inner_text]}]
         
@@ -266,6 +284,8 @@ module Nesta
               status = item.at('wp:status').inner_text
               status = "protected" if not item.at('wp:post_password').inner_text.empty?
               is_public = status == "publish"
+              
+            
 
               #Get the slug, fallback to normalized title, then fallback to post ID.
               post_name = item.at('wp:post_name').inner_text
@@ -288,19 +308,24 @@ module Nesta
                 #Named, but status=draft, private, protected, pending posts simply get flagged, not renamed
                 if new_path.empty?;
                   new_path = "drafts/#{post_name}"
-                elsif !is_public
-                  puts "Page #{new_path} has a status of #{status}. Please review file."
+                #elsif !is_public
+                #  puts "Page #{new_path} has a status of #{status}. Please review file."
                 end 
               elsif type == "post"
                 #Only public articles go into /blog/ 
                 if is_public
                   new_path = "blog/#{post_date_gmt.year}/#{post_name}"
-                  puts "Article #{old_path_query} was placed at #{new_path}"
+                  #puts "Article #{old_path_query} was placed at #{new_path}"
                 else
                   new_path = "drafts/#{post_name}"
-                  puts "(#{status} article #{old_path_query} was placed at #{new_path}"
+                  #puts "(#{status} article #{old_path_query} was placed at #{new_path}"
                 end
               end
+              
+              ## Now that we know if it's visible, say we're importing it
+              puts
+              puts "Importing #{is_public ? '' : status + ' '}#{type} #{post_id} - '#{title}' - '#{old_path_query}'"
+            
         
               short_new_path = new_path
         
@@ -309,7 +334,17 @@ module Nesta
         
               #Acquire a list of all the URLs that may have been used to link to this post or page, so we can add redirects later
               #Exclude any duplicates with previous files - first come, first serve.
-              alternate_urls = get_alternate_urls(item,metas, offline).reject{|u|
+              alternate_urls = offline_available_urls = get_alternate_urls(item,metas, true)
+  
+              puts "Alternate URLs: #{alternate_urls * "  "}"
+              if (scanredirects)
+                print "Scanning for additional URLs... "
+                alternate_urls = get_alternate_urls(item,metas, false)
+                extra_urls = alternate_urls - offline_available_urls
+                puts extra_urls.empty? ? "None found" : "Found #{extra_urls * " "}"
+              end
+            
+              alternate_urls = alternate_urls.reject{|u|
                 if items_by_urls.has_key?(u)
                   puts "Duplicate URL '#{u}' used by more than one item - will not be added"
                   puts "Current:  #{short_new_path},   First item: #{items_by_urls[u]}"
@@ -320,7 +355,9 @@ module Nesta
                   false
                 end
               }
-
+              
+              puts "Writing file to #{short_new_path}.htmf"
+              
               #Convert post_id to an int unless its a string (to avoid the quotes)
               post_id = post_id.to_i if post_id.match(/^\d+$/)
           
@@ -334,7 +371,7 @@ module Nesta
                         "wp_template" => wp_template,                    
                         "Summary" => item.at('excerpt:encoded').inner_text.strip,
                         "wp_status" => status == "publish" ? "" : status,
-                        "Flags" => status == "publish" ? "hidden" : "",
+                        "Flags" => status == "publish" ? "" : "hidden",
                         "Categories" => categories * ", ",
                         "Tags" => tags * ", "
                         }
@@ -349,7 +386,7 @@ module Nesta
           
               #drop the excluded metadata
               metadata.reject!{|k,v| drop_metadata.include?(k)}
-          
+              
               #Create file
               FileUtils.mkdir_p File.dirname(new_path) if not Dir.exists?(File.dirname(new_path)) 
               File.open(new_path, "w") do |f|
@@ -364,7 +401,7 @@ module Nesta
             end
             import_count[type] += 1
           end
-
+          puts
           import_count.each do |key, value|
             puts "Imported #{value} #{key}s"
           end
@@ -373,5 +410,5 @@ module Nesta
     end
   end
 end
-Nesta::Plugins::Wordpress::Importer.main
+Nesta::Plugins::Wordpress::Importer.new.importFromCommandLine
 
