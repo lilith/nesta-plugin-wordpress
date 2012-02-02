@@ -3,17 +3,19 @@
 
 
 # This does a fast 'offline import'. Use this first to verify there are no errors
-# ruby -r './import.rb' -e 'Nesta::WordpressImport.process(true)'
+# bundle exec wordpress-to-nesta -f -a
 
 # Use this to perform a full import. Downloads all attachments and checks for 301/302 redirects to determine what aliases need to be specified for each page
-# ruby -r './import.rb' -e 'Nesta::WordpressImport.process()'
+# bundle exec wordpress-to-nesta
 
 # If you want to add the "Author", "wp_date", or "wp_template" metadata fields, pass in an empty array to the drop_metadata parameter
-# ruby -r './import.rb' -e 'Nesta::WordpressImport.process(true, "wordpress.xml",[])'
+# bundle exec wordpress-to-nesta -d keep-metadata
 
-#  Or, drop everything
-# ruby -r './import.rb' -e 'Nesta::WordpressImport.process(true, "wordpress.xml",["Author","wp_status","Flags","wp_date","wp_template", "Aliases", "Atom ID", "Post ID", "Status", "Categories", "Tags"])'
+# Or, drop everything
+# bundle exec wordpress-to-nesta -d "Author","wp_status","Flags","wp_date","wp_template","Aliases","Atom ID","Post ID","Status","Categories","Tags"
 
+# If you're not using wordpress.xml, you can specify it
+# bundle exec wordpress-to-nesta -c wordpress-2.xml
 
 
 require 'rubygems'
@@ -39,7 +41,7 @@ module Nesta
           downloadattachments = true
           root = Dir.pwd
           filename = "wordpress.xml"
-          drop_metadata=["Author","wp_date","wp_template"]
+          drop_metadata=["Author","wp_date","wp_template","Post ID"]
           
           options = {}
           OptionParser.new do |opts|
@@ -61,7 +63,8 @@ module Nesta
               scanredirects = !v
             end
             
-            opts.on("-d","--drop-metadata \"Author\",\"wp_date\",\"wp_template\"", Array, "Drop the specified metadata items from the all files during conversion.") do |list|
+            opts.on("-d","--drop-metadata \"Author\",\"wp_date\",\"wp_template\"", Array, 
+            "Drop the specified metadata items from the all files during conversion. No spaces between items allowed. Specify --drop-metadata none to drop no metadata. Defaults to dropping \"Author\",\"wp_date\",\"wp_template\",\"Post ID\"") do |list|
               drop_metadata = list
             end
             
@@ -387,10 +390,14 @@ module Nesta
               #drop the excluded metadata
               metadata.reject!{|k,v| drop_metadata.include?(k)}
               
+              #Convert all newlines to encoded values
+              metadata.each { |k, v| metadata[k] = v.gsub("\n","\\n") if v.is_a? String }
+              
+              
               #Create file
               FileUtils.mkdir_p File.dirname(new_path) if not Dir.exists?(File.dirname(new_path)) 
               File.open(new_path, "w") do |f|
-                f.puts metadata.to_yaml.gsub(/^---\s*/,"") #Strip leading dashes
+                f.puts metadata.to_yaml.gsub(/^---\s*/,"") if not metadata.empty? #Strip leading dashes
                 f.puts "\n<h1>#{title}</h1>\n\n"
                 f.puts tidy_html(item.at('content:encoded').inner_text)
                 f.puts "\n"
